@@ -86,10 +86,17 @@ final class KeyboardObserver: NSObject {
         if let tf = responder as? UITextField, tf.inputAccessoryView == nil {
             tf.inputAccessoryView = makeNullAccessoryView()
             activeInput = tf
+            // The accessory view is assigned lazily on the first begin-editing.
+            // Without `reloadInputViews()` UIKit only installs it into the keyboard
+            // host on the NEXT editing session, leaving `inputAccessoryView.superview
+            // == nil` for the current one — so `keyboardView` never resolves and the
+            // KVO frame observer never attaches on the very first keyboard show.
+            tf.reloadInputViews()
             refreshKeyboardView()
         } else if let tv = responder as? UITextView, tv.inputAccessoryView == nil, tv.isEditable {
             tv.inputAccessoryView = makeNullAccessoryView()
             activeInput = tv
+            tv.reloadInputViews()
             refreshKeyboardView()
         }
     }
