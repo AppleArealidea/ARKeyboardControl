@@ -9,6 +9,10 @@ let package = Package(
         .library(name: "KeyboardControl", targets: ["KeyboardControl"])
     ],
     targets: [
-        .target(name: "KeyboardControl")
+        .target(name: "KeyboardControl"),
+        .testTarget(
+            name: "KeyboardControlTests",
+            dependencies: ["KeyboardControl"]
+        )
     ]
 )
