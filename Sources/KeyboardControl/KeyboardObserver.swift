@@ -17,6 +17,12 @@ final class KeyboardObserver: NSObject {
 
     private(set) var isKeyboardVisible = false
     private(set) var currentKeyboardFrame: CGRect = .zero
+    private var areNotificationObserversRegistered = false
+
+    enum NotificationRegistrationMode {
+        case panning
+        case keyboardOnly
+    }
 
     var activeInput: UIResponder?
     var keyboardView: UIView? {
@@ -39,13 +45,18 @@ final class KeyboardObserver: NSObject {
 
     // MARK: - Setup
 
-    func setupNotificationObservers() {
+    func registerNotificationObservers(ifNeeded mode: NotificationRegistrationMode) {
+        guard !areNotificationObserversRegistered else { return }
+        areNotificationObserversRegistered = true
+
         let nc = NotificationCenter.default
 
-        nc.addObserver(self, selector: #selector(textInputDidBeginEditing(_:)),
-                       name: UITextField.textDidBeginEditingNotification, object: nil)
-        nc.addObserver(self, selector: #selector(textInputDidBeginEditing(_:)),
-                       name: UITextView.textDidBeginEditingNotification, object: nil)
+        if mode == .panning {
+            nc.addObserver(self, selector: #selector(textInputDidBeginEditing(_:)),
+                           name: UITextField.textDidBeginEditingNotification, object: nil)
+            nc.addObserver(self, selector: #selector(textInputDidBeginEditing(_:)),
+                           name: UITextView.textDidBeginEditingNotification, object: nil)
+        }
 
         nc.addObserver(self, selector: #selector(keyboardWillShow(_:)),
                        name: UIResponder.keyboardWillShowNotification, object: nil)
@@ -61,6 +72,7 @@ final class KeyboardObserver: NSObject {
 
     func tearDown() {
         NotificationCenter.default.removeObserver(self)
+        areNotificationObserversRegistered = false
 
         if let view = view, let pan = panHandler {
             view.removeGestureRecognizer(pan.panRecognizer)
@@ -77,7 +89,10 @@ final class KeyboardObserver: NSObject {
     // MARK: - Text Input Tracking
 
     @objc private func textInputDidBeginEditing(_ notification: Notification) {
-        guard let responder = notification.object as? UIResponder else { return }
+        guard let view = view,
+              let responder = notification.object as? UIResponder,
+              let responderView = responder as? UIView,
+              responderView.isDescendant(of: view) else { return }
         activeInput = responder
         ensureInputAccessoryView(for: responder)
     }

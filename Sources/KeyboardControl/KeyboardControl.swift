@@ -19,8 +19,12 @@ public extension UIView {
             scrollView.keyboardDismissMode = .interactive
         }
 
-        observer.panHandler = KeyboardPanHandler(view: self, observer: observer)
-        observer.setupNotificationObservers()
+        if observer.panHandler == nil {
+            observer.panHandler = KeyboardPanHandler(view: self, observer: observer)
+        } else {
+            observer.panHandler?.observer = observer
+        }
+        observer.registerNotificationObservers(ifNeeded: .panning)
     }
 
     // MARK: - Non-panning (keyboard awareness only)
@@ -32,9 +36,9 @@ public extension UIView {
         if #available(iOS 15.0, *) {
             let adapter = KeyboardLayoutGuideAdapter(view: self, actionBlock: actionHandler)
             observer.layoutGuideAdapter = adapter
-            observer.setupNotificationObservers()
+            observer.registerNotificationObservers(ifNeeded: .keyboardOnly)
         } else {
-            observer.setupNotificationObservers()
+            observer.registerNotificationObservers(ifNeeded: .keyboardOnly)
         }
     }
 
