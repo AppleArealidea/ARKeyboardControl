@@ -9,282 +9,72 @@ public typealias KeyboardDidMoveBlock = (
 
 final class KeyboardObserver: NSObject {
 
-    weak var view: UIView?
-    var frameBasedBlock: KeyboardDidMoveBlock?
-    var constraintBasedBlock: KeyboardDidMoveBlock?
-    var panHandler: KeyboardPanHandler?
-    var layoutGuideAdapter: AnyObject?
+    private weak var view: UIView?
+    private let handler: KeyboardDidMoveBlock
+    private var classifier: KeyboardEventClassifier
 
-    private(set) var isKeyboardVisible = false
-    private(set) var currentKeyboardFrame: CGRect = .zero
-    private var areNotificationObserversRegistered = false
+    var isKeyboardVisible: Bool { classifier.isKeyboardVisible }
 
-    enum NotificationRegistrationMode {
-        case panning
-        case keyboardOnly
-    }
-
-    var activeInput: UIResponder?
-    var keyboardView: UIView? {
-        didSet {
-            oldValue?.removeObserver(self, forKeyPath: "frame")
-            if let kv = keyboardView {
-                kv.addObserver(self, forKeyPath: "frame", options: [], context: nil)
-            }
-        }
-    }
-
-    init(view: UIView) {
+    init(view: UIView, handler: @escaping KeyboardDidMoveBlock) {
         self.view = view
+        self.handler = handler
+        // The keyboard may already be up when the control is added.
+        let isUp = view.window != nil
+            && view.keyboardLayoutGuide.layoutFrame.height > view.safeAreaInsets.bottom
+        classifier = KeyboardEventClassifier(isKeyboardVisible: isUp)
         super.init()
+
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(keyboardWillShow(_:)),
+                           name: UIResponder.keyboardWillShowNotification, object: nil)
+        center.addObserver(self, selector: #selector(keyboardWillChangeFrame(_:)),
+                           name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        center.addObserver(self, selector: #selector(keyboardWillHide(_:)),
+                           name: UIResponder.keyboardWillHideNotification, object: nil)
+        center.addObserver(self, selector: #selector(keyboardDidHide(_:)),
+                           name: UIResponder.keyboardDidHideNotification, object: nil)
     }
 
     deinit {
-        tearDown()
-    }
-
-    // MARK: - Setup
-
-    func registerNotificationObservers(ifNeeded mode: NotificationRegistrationMode) {
-        guard !areNotificationObserversRegistered else { return }
-        areNotificationObserversRegistered = true
-
-        let nc = NotificationCenter.default
-
-        if mode == .panning {
-            nc.addObserver(self, selector: #selector(textInputDidBeginEditing(_:)),
-                           name: UITextField.textDidBeginEditingNotification, object: nil)
-            nc.addObserver(self, selector: #selector(textInputDidBeginEditing(_:)),
-                           name: UITextView.textDidBeginEditingNotification, object: nil)
-        }
-
-        nc.addObserver(self, selector: #selector(keyboardWillShow(_:)),
-                       name: UIResponder.keyboardWillShowNotification, object: nil)
-        nc.addObserver(self, selector: #selector(keyboardDidShow),
-                       name: UIResponder.keyboardDidShowNotification, object: nil)
-        nc.addObserver(self, selector: #selector(keyboardWillChangeFrame(_:)),
-                       name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
-        nc.addObserver(self, selector: #selector(keyboardWillHide(_:)),
-                       name: UIResponder.keyboardWillHideNotification, object: nil)
-        nc.addObserver(self, selector: #selector(keyboardDidHide),
-                       name: UIResponder.keyboardDidHideNotification, object: nil)
-    }
-
-    func tearDown() {
         NotificationCenter.default.removeObserver(self)
-        areNotificationObserversRegistered = false
-
-        if let view = view, let pan = panHandler {
-            view.removeGestureRecognizer(pan.panRecognizer)
-        }
-        panHandler = nil
-
-        keyboardView = nil
-        activeInput = nil
-        frameBasedBlock = nil
-        constraintBasedBlock = nil
-        layoutGuideAdapter = nil
     }
-
-    // MARK: - Text Input Tracking
-
-    @objc private func textInputDidBeginEditing(_ notification: Notification) {
-        guard let view = view,
-              let responder = notification.object as? UIResponder,
-              let responderView = responder as? UIView,
-              responderView.isDescendant(of: view) else { return }
-        activeInput = responder
-        ensureInputAccessoryView(for: responder)
-    }
-
-    private func ensureInputAccessoryView(for responder: UIResponder) {
-        if let tf = responder as? UITextField, tf.inputAccessoryView == nil {
-            tf.inputAccessoryView = makeNullAccessoryView()
-            activeInput = tf
-            // The accessory view is assigned lazily on the first begin-editing.
-            // Without `reloadInputViews()` UIKit only installs it into the keyboard
-            // host on the NEXT editing session, leaving `inputAccessoryView.superview
-            // == nil` for the current one — so `keyboardView` never resolves and the
-            // KVO frame observer never attaches on the very first keyboard show.
-            tf.reloadInputViews()
-            refreshKeyboardView()
-        } else if let tv = responder as? UITextView, tv.inputAccessoryView == nil, tv.isEditable {
-            tv.inputAccessoryView = makeNullAccessoryView()
-            activeInput = tv
-            tv.reloadInputViews()
-            refreshKeyboardView()
-        }
-    }
-
-    private func makeNullAccessoryView() -> UIView {
-        let v = UIView(frame: .zero)
-        v.backgroundColor = .clear
-        return v
-    }
-
-    private func refreshKeyboardView() {
-        keyboardView = activeInput?.inputAccessoryView?.superview
-        keyboardView?.isHidden = false
-    }
-
-    // MARK: - Keyboard Notifications
 
     @objc private func keyboardWillShow(_ notification: Notification) {
-        guard let view = view, !isKeyboardVisible else { return }
-        let info = notification.userInfo ?? [:]
-
-        let beginFrame = frameInView(info[UIResponder.keyboardFrameBeginUserInfoKey], view: view)
-        let endFrame = frameInView(info[UIResponder.keyboardFrameEndUserInfoKey], view: view)
-        let duration = (info[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-        let curveRaw = (info[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int) ?? 7
-        let options = UIView.AnimationOptions(rawValue: UInt(curveRaw) << 16)
-
-        keyboardView?.isHidden = false
-        isKeyboardVisible = true
-        currentKeyboardFrame = endFrame
-
-        let hasConstraintBlock = constraintBasedBlock != nil && !endFrame.isNull && !beginFrame.isNull
-        if hasConstraintBlock {
-            constraintBasedBlock?(beginFrame, endFrame, true, false)
-        }
-
-        UIView.animate(withDuration: duration, delay: 0, options: [options, .beginFromCurrentState], animations: {
-            if hasConstraintBlock {
-                view.layoutIfNeeded()
-            }
-            if self.frameBasedBlock != nil && !endFrame.isNull && !beginFrame.isNull {
-                self.frameBasedBlock?(beginFrame, endFrame, true, false)
-            }
-        }, completion: { _ in
-            self.panHandler?.installIfNeeded()
-        })
-    }
-
-    @objc private func keyboardDidShow() {
-        refreshKeyboardView()
+        deliver(.willShow, notification)
     }
 
     @objc private func keyboardWillChangeFrame(_ notification: Notification) {
-        guard let view = view, isKeyboardVisible else { return }
-        let info = notification.userInfo ?? [:]
-
-        let beginFrame = frameInView(info[UIResponder.keyboardFrameBeginUserInfoKey], view: view)
-        let endFrame = frameInView(info[UIResponder.keyboardFrameEndUserInfoKey], view: view)
-        let duration = (info[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-        let curveRaw = (info[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int) ?? 7
-        let options = UIView.AnimationOptions(rawValue: UInt(curveRaw) << 16)
-
-        currentKeyboardFrame = endFrame
-
-        let hasConstraintBlock = constraintBasedBlock != nil && !endFrame.isNull && !beginFrame.isNull
-        if hasConstraintBlock {
-            constraintBasedBlock?(beginFrame, endFrame, false, false)
-        }
-
-        UIView.animate(withDuration: duration, delay: 0, options: [options, .beginFromCurrentState], animations: {
-            if hasConstraintBlock {
-                view.layoutIfNeeded()
-            }
-            if self.frameBasedBlock != nil && !endFrame.isNull && !beginFrame.isNull {
-                self.frameBasedBlock?(beginFrame, endFrame, false, false)
-            }
-        })
+        deliver(.willChangeFrame, notification)
     }
 
     @objc private func keyboardWillHide(_ notification: Notification) {
-        guard let view = view, isKeyboardVisible else { return }
+        deliver(.willHide, notification)
+    }
+
+    @objc private func keyboardDidHide(_ notification: Notification) {
+        deliver(.didHide, notification)
+    }
+
+    private func deliver(_ kind: KeyboardNotificationKind, _ notification: Notification) {
+        guard let view else { return }
         let info = notification.userInfo ?? [:]
+        // Another app's keyboard (Split View, Slide Over) is not ours to react to.
+        if let isLocal = info[UIResponder.keyboardIsLocalUserInfoKey] as? Bool, !isLocal { return }
+        let begin = frame(info[UIResponder.keyboardFrameBeginUserInfoKey], in: view)
+        let end = frame(info[UIResponder.keyboardFrameEndUserInfoKey], in: view)
+        guard let event = classifier.handle(kind, begin: begin, end: end) else { return }
 
-        let beginFrame = frameInView(info[UIResponder.keyboardFrameBeginUserInfoKey], view: view)
-        var endFrame = frameInView(info[UIResponder.keyboardFrameEndUserInfoKey], view: view)
         let duration = (info[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-        let curveRaw = (info[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int) ?? 7
-        let options = UIView.AnimationOptions(rawValue: UInt(curveRaw) << 16)
-
-        endFrame.size.height = beginFrame.size.height
-
-        let hasConstraintBlock = constraintBasedBlock != nil && !endFrame.isNull && !beginFrame.isNull
-        if hasConstraintBlock {
-            constraintBasedBlock?(beginFrame, endFrame, false, true)
+        let curve = (info[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int) ?? 7
+        let options = UIView.AnimationOptions(rawValue: UInt(curve) << 16)
+        let handler = self.handler
+        UIView.animate(withDuration: duration, delay: 0, options: [options, .beginFromCurrentState]) {
+            handler(event.begin, event.end, event.opening, event.closing)
         }
-
-        UIView.animate(withDuration: duration, delay: 0, options: [options, .beginFromCurrentState], animations: {
-            if hasConstraintBlock {
-                view.layoutIfNeeded()
-            }
-
-            let yDiff = abs(endFrame.origin.y - beginFrame.origin.y)
-
-            if self.frameBasedBlock != nil && !endFrame.isNull && !beginFrame.isNull {
-                if yDiff >= beginFrame.height {
-                    self.frameBasedBlock?(beginFrame, endFrame, false, true)
-                } else {
-                    self.frameBasedBlock?(beginFrame, endFrame, true, true)
-                }
-            }
-        }, completion: { _ in
-            self.panHandler?.uninstall()
-        })
     }
 
-    @objc private func keyboardDidHide() {
-        keyboardView?.isHidden = false
-        keyboardView?.isUserInteractionEnabled = true
-        keyboardView = nil
-        activeInput = nil
-        isKeyboardVisible = false
-        currentKeyboardFrame = .zero
-    }
-
-    // MARK: - KVO (keyboard view frame during panning)
-
-    override func observeValue(forKeyPath keyPath: String?,
-                               of object: Any?,
-                               change: [NSKeyValueChangeKey: Any]?,
-                               context: UnsafeMutableRawPointer?) {
-        guard keyPath == "frame",
-              let kv = object as? UIView,
-              kv === keyboardView,
-              let view = view,
-              !kv.isHidden else { return }
-
-        let endFrame = view.convert(kv.frame, from: kv.superview)
-        guard endFrame != currentKeyboardFrame else { return }
-
-        frameBasedBlock?(endFrame, endFrame, false, false)
-        if constraintBasedBlock != nil {
-            constraintBasedBlock?(endFrame, endFrame, false, false)
-            view.layoutIfNeeded()
-        }
-        currentKeyboardFrame = endFrame
-    }
-
-    // MARK: - Helpers
-
-    func hideKeyboard() {
-        guard let kv = keyboardView else { return }
-        kv.isHidden = true
-        kv.isUserInteractionEnabled = false
-        activeInput?.resignFirstResponder()
-    }
-
-    func keyboardFrameInView() -> CGRect {
-        guard let view = view, let kv = keyboardView else {
-            return CGRect(x: 0, y: UIScreen.main.bounds.height, width: 0, height: 0)
-        }
-        return view.convert(kv.frame, from: kv.superview)
-    }
-
-    func findFirstResponder(in view: UIView) -> UIView? {
-        if view.isFirstResponder { return view }
-        for sub in view.subviews {
-            if let found = findFirstResponder(in: sub) { return found }
-        }
-        return nil
-    }
-
-    private func frameInView(_ value: Any?, view: UIView) -> CGRect {
-        guard let nsValue = value as? NSValue else { return .null }
-        return view.convert(nsValue.cgRectValue, from: nil)
+    private func frame(_ value: Any?, in view: UIView) -> CGRect? {
+        guard let value = value as? NSValue else { return nil }
+        return view.convert(value.cgRectValue, from: nil)
     }
 }

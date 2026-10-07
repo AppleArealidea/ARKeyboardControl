@@ -1,19 +1,10 @@
 # ARKeyboardControl
 
-Lightweight Swift library that adds keyboard awareness and interactive dismissal to any `UIView`. Inspired by [DAKeyboardControl](https://github.com/danielamitay/DAKeyboardControl), rewritten from scratch in pure Swift without method swizzling.
-
-## Features
-
-- **Interactive dismiss** — drag down to dismiss keyboard, like in iMessage
-- **Non-panning mode** — track keyboard appearance/disappearance without gestures
-- **Two callback modes** — frame-based (inside animation block) and constraint-based (before animation)
-- **iOS 15+ optimization** — uses `keyboardLayoutGuide` for non-panning mode when available
-- **Minimal footprint** — single associated object per view, clean teardown
-- **No swizzling** — no `+load`, no method exchange, no global side effects
+Small Swift library that reports keyboard show, hide and frame-change events for a `UIView`. Inspired by [DAKeyboardControl](https://github.com/danielamitay/DAKeyboardControl), rewritten in pure Swift. The package observes keyboard notifications and classifies them; it does not move views and does not recognise gestures.
 
 ## Requirements
 
-- iOS 13.0+
+- iOS 15.0+
 - Swift 5.7+
 
 ## Installation
@@ -24,93 +15,18 @@ Add the package dependency:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/AppleArealidea/ARKeyboardControl.git", from: "1.0.0")
+    .package(url: "https://github.com/AppleArealidea/ARKeyboardControl.git", from: "2.0.0")
 ]
 ```
 
 Or add it as a local package in Xcode via File > Add Package Dependencies.
 
-## Usage
-
-### Interactive keyboard dismiss (chat screens)
-
-```swift
-import KeyboardControl
-
-override func viewDidAppear(_ animated: Bool) {
-    super.viewDidAppear(animated)
-
-    view.addKeyboardPanning { beginFrame, endFrame, opening, closing in
-        // Called inside UIView.animate — update frames here
-        if opening {
-            tableView.contentOffset.y += beginFrame.minY - endFrame.minY
-        }
-    } constraintBasedActionHandler: { _, endFrame, _, _ in
-        // Called before animation — update constraints here
-        let offset = view.frame.height - endFrame.minY - view.safeAreaInsets.bottom
-        bottomConstraint.constant = offset > 0 ? -offset : 0
-    }
-}
-
-override func viewWillDisappear(_ animated: Bool) {
-    super.viewWillDisappear(animated)
-    view.removeKeyboardControl()
-}
-```
-
-### Keyboard awareness only (no gestures)
-
-```swift
-view.addKeyboardNonpanning { _, endFrame, opening, closing in
-    let offset = view.frame.height - endFrame.origin.y - view.safeAreaInsets.bottom
-    bottomConstraint.constant = offset > 0 ? -offset : 0
-    view.layoutIfNeeded()
-}
-```
-
-On iOS 15+ this automatically uses `keyboardLayoutGuide` under the hood.
-
-### Gesture coordination
-
-Access the pan gesture recognizer to coordinate with other gestures:
-
-```swift
-if let keyboardPan = view.keyboardPanRecognizer {
-    myGesture.require(toFail: keyboardPan)
-}
-```
-
-### Utilities
-
-```swift
-view.hideKeyboard()        // Programmatically dismiss
-view.isKeyboardOpened      // Current state
-view.keyboardFrameInView   // Keyboard frame in view's coordinate space
-```
-
-### Cleanup
-
-Always call `removeKeyboardControl()` when the view is going away:
-
-```swift
-// In viewWillDisappear or deinit
-view.removeKeyboardControl()
-```
-
 ## API
 
 ```swift
 public extension UIView {
-    func addKeyboardPanning(
-        frameBasedActionHandler: @escaping KeyboardDidMoveBlock,
-        constraintBasedActionHandler: @escaping KeyboardDidMoveBlock
-    )
-    func addKeyboardNonpanning(actionHandler: @escaping KeyboardDidMoveBlock)
+    func addKeyboardControl(actionHandler: @escaping KeyboardDidMoveBlock)
     func removeKeyboardControl()
-    func hideKeyboard()
-
-    var keyboardPanRecognizer: UIPanGestureRecognizer? { get }
-    var keyboardFrameInView: CGRect { get }
     var isKeyboardOpened: Bool { get }
 }
 
@@ -122,14 +38,44 @@ public typealias KeyboardDidMoveBlock = (
 ) -> Void
 ```
 
-## Callback parameters
+- `addKeyboardControl(actionHandler:)` starts observing the keyboard for the view. The handler runs inside a `UIView` animation that uses the duration and curve of the keyboard notification. Frames are in the view's coordinate space. Calling it again replaces the previous observer of that view.
+- `removeKeyboardControl()` stops observing.
+- `isKeyboardOpened` becomes `true` when the keyboard starts to show and `false` at `keyboardDidHide`. When the control is added to a view that is already in a window, the initial value is taken from the view's `keyboardLayoutGuide`, so adding it while the keyboard is up works. When the view is not in a window yet (for example in `viewDidLoad`), it starts as `false`, and a keyboard that is already up is noticed only at its next show. It is `false` if no control was added. Notifications from another app's keyboard are ignored.
 
-| Parameter | Description |
-|-----------|-------------|
-| `keyboardBeginFrame` | Keyboard frame before the transition (in view's coordinates) |
-| `keyboardEndFrame` | Keyboard frame after the transition (in view's coordinates) |
-| `opening` | `true` when keyboard is appearing |
-| `closing` | `true` when keyboard is disappearing |
+## Events
+
+| Source notification | State when it arrives | `opening` | `closing` | Handler called |
+|---|---|---|---|---|
+| `keyboardWillShow` | keyboard hidden | `true` | `false` | yes |
+| `keyboardWillShow` | keyboard already visible | - | - | no |
+| `keyboardWillChangeFrame` | keyboard visible | `false` | `false` | yes |
+| `keyboardWillChangeFrame` | keyboard hidden | - | - | no |
+| `keyboardWillHide` (end frame is a full keyboard height below the begin frame) | keyboard visible | `false` | `true` | yes |
+| `keyboardWillHide` (keyboard already partly lowered, for example at the end of an interactive drag) | keyboard visible | `true` | `true` | yes |
+| `keyboardWillHide` | keyboard hidden | - | - | no |
+| `keyboardDidHide` | any | - | - | no, it only marks the keyboard as hidden |
+
+For `keyboardWillHide` the end frame passed to the handler has the height of the begin frame, because the system may report a shorter end frame there.
+
+## Positioning views
+
+Position views with `keyboardLayoutGuide`; use the handler for work a constraint cannot express.
+
+```swift
+inputBar.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor).isActive = true
+
+view.addKeyboardControl { [weak self] begin, end, opening, closing in
+    // Runs inside the keyboard animation: adjust what constraints cannot express.
+    guard let self, opening, !closing else { return }
+    self.tableView.contentOffset.y += begin.minY - end.minY
+}
+```
+
+Interactive dismissal comes from `UIScrollView.keyboardDismissMode = .interactive`.
+
+## Changes
+
+2.0.0 — breaking: see above
 
 ## License
 
