@@ -28,6 +28,7 @@ public extension UIView {
     func addKeyboardControl(actionHandler: @escaping KeyboardDidMoveBlock)
     func removeKeyboardControl()
     var isKeyboardOpened: Bool { get }
+    var keyboardDismissPadding: CGFloat { get set }
 }
 
 public typealias KeyboardDidMoveBlock = (
@@ -41,6 +42,7 @@ public typealias KeyboardDidMoveBlock = (
 - `addKeyboardControl(actionHandler:)` starts observing the keyboard for the view. The handler runs inside a `UIView` animation that uses the duration and curve of the keyboard notification. Frames are in the view's coordinate space. Calling it again replaces the previous observer of that view.
 - `removeKeyboardControl()` stops observing.
 - `isKeyboardOpened` becomes `true` when the keyboard starts to show and `false` at `keyboardDidHide`. When the control is added to a view that is already in a window, the initial value is taken from the view's `keyboardLayoutGuide`, so adding it while the keyboard is up works. When the view is not in a window yet (for example in `viewDidLoad`), it starts as `false`, and a keyboard that is already up is noticed only at its next show. It is `false` if no control was added. Notifications from another app's keyboard are ignored.
+- `keyboardDismissPadding` widens the touch area of the interactive dismissal (`UIScrollView.keyboardDismissMode = .interactive`) above the keyboard: the drag takes the keyboard this many points before the finger reaches it. Set it to the height of the bar that rests on the keyboard, and the keyboard follows the finger as soon as the finger reaches the bar. Set it on the view whose `keyboardLayoutGuide` the bar is pinned to (typically the view controller's view); set on the scroll view itself, it has no effect. It forwards to `keyboardLayoutGuide.keyboardDismissPadding` (iOS 17+); on iOS 15 and 16 it does nothing and reads `0`. It does not need `addKeyboardControl`.
 
 ## Events
 
@@ -74,6 +76,8 @@ view.addKeyboardControl { [weak self] begin, end, opening, closing in
 Interactive dismissal comes from `UIScrollView.keyboardDismissMode = .interactive`.
 
 ## Changes
+
+2.1.0 — `keyboardDismissPadding`
 
 2.0.0 — breaking: see above
 
